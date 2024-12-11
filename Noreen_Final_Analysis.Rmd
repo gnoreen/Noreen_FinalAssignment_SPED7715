@@ -1,0 +1,1164 @@
+---
+title: "Final Project Analysis"
+author: "Gabriella Noreen"
+date: "2024-12-11"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data Wrangling  
+  
+## Initial call of the data  
+  
+Note: This calls core variables only, not including IQ data or GPA data [see below]    
+```{r, message = FALSE}
+rm(list=ls(all=TRUE)) 
+library(tidyverse)
+library(ggplot2)
+library(corrplot)
+library(caret)
+library(psych)
+library(factoextra) #extract and visualize the output of multivariate data analyses, including 'PCA'
+
+nlsy_core <- read.csv("NLSY_CORE.csv") # Read in dataset with initial variables pulled
+
+
+# Read in data on marital status 
+# (also contains information on the number of kids in the HH in 1999 
+# and whether the participant had a child before their first marriage)
+nlsy_marriage <- read.csv("NLSY_marriage_kids1999.csv") %>% 
+  # remove redundant demographic variables (sex, race, etc.)
+  dplyr::select(-R0173600, -R0214700, -R0214800, -R6486300) %>% 
+  filter(R6479300 < 2) # filter only those who are married or unmarried 
+
+# Provide more descriptive names 
+colnames(nlsy_marriage) <- c("R0000100", 
+                         "Marital_Status", # 0 never married, 1 married 
+                         "Num_Kids_HH", # Number of kids in hh
+                         "Child_b4_marriage") # 0 child b4 marriage, 1 marriage b4 1st child
+nlsy_marriage <- nlsy_marriage %>% 
+  # remove variables based on decision to look at 2009 income and children
+  dplyr::select(-Num_Kids_HH, -Child_b4_marriage)
+
+nlsy_core <- left_join(nlsy_core, nlsy_marriage) # merge marrige indicator into core file
+
+
+# Read in file for number of kids in HH in 2009 (when income data was examined)
+nlsy_kids2009 <- read.csv("NLSY_kids2009.csv") 
+
+# improve column name for data on kids in HH in 2009
+colnames(nlsy_kids2009) <- c("R0000100", 
+                         "Num_Kids_HH")
+
+# Merge number of children variable with core dataset
+nlsy_core <- left_join(nlsy_core, nlsy_kids2009)
+
+
+# Negative values indicate missing, convert to NA
+nlsy_core[nlsy_core < 0] <- NA
+
+dim(nlsy_core) # Current dimensions
+```
+  
+## Create IQ composite  
+  
+Since there were up to 11 IQ scores reported (and possible inconsistency in scoring systems), a composite of the IQ percentile rank was created for each participant. For any number of IQ scores and corresponding percentile reported for each participant, the average IQ percentile rank was calculated.  
+```{r}
+nlsy_IQ <- read.csv("NLSY_IQ.csv") # Call in data with IQ composite variables
+
+nlsy_IQ[nlsy_IQ < 0] <- NA # Convert negative values to NA (indicates skipped/missing data)
+
+# Select ID and percentile variables 
+nlsy_IQ <- nlsy_IQ %>% 
+            dplyr::select(R0000100, R0017312, R0017317, R0017322, R0017327, R0017332, R0017337, R0017342, 
+                   R0017347, R0017352, R0017388, R0017394)
+
+# Calculate row means for each percentile rank reported (skipping over the ID column (i.e., [,-1]))
+nlsy_IQ$avg_IQ_percentile <- rowMeans(nlsy_IQ[,-1], na.rm = TRUE) 
+
+# Convert the NaNs to NAs
+nlsy_IQ <- nlsy_IQ %>% mutate_all(~ifelse(is.nan(.), NA, .))
+
+nlsy_IQ_complete <- nlsy_IQ %>% 
+                     dplyr::select(R0000100, avg_IQ_percentile) # Select only ID column and average percentile to join
+
+# Take a peek at the IQ composite variable
+head(nlsy_IQ_complete)
+
+
+# Join average IQ percentile composite with core variables from above
+nlsy <- left_join(nlsy_core, nlsy_IQ_complete, by = "R0000100")
+nrow(nlsy)
+```
+  
+## Calculate GPA 
+  
+The GPA data included the grade level the course was taken in, course code, grade received, source of information (final grade reported by school, year's grades reported and averaged, or partial grades reported and averaged), and number of credits received for up to 64 courses per student. For ease of understanding the overall high school GPA for each student (and to maximize the information given since there were high amounts of missingness), the overall GPA was calculated as the average grade received across any number of courses reported.    
+```{r}
+# Call in data with GPA variables
+nlsy_GPA <- read.csv("NLSY_GPA.csv")
+
+# For ease of analysis, pull the IDs from nlsy_core who had no errors on their transcript...
+nlsy_no_error_ts <- nlsy_core %>% 
+                      dplyr::select(R0000100, R0620602) %>% # Select ID variable and transcript status variable
+                      filter(R0620602 == 0) # Filter only those with no transcript errors noted
+
+# Merge selected IDs with our GPA data
+nlsy_GPA_noError <- left_join(nlsy_no_error_ts, nlsy_GPA, by = "R0000100") %>% 
+                      dplyr::select(-R0620602) # And drop the transcript status column
+
+# Currently the data is in wide format, need it in long format to calculate GPA 
+
+# Need to rename the columns first before I pivot
+colnames(nlsy_GPA_noError) <- c("R0000100",
+                                "C1_Year","C1_CC","C1_Grade","C1_Source", "C1_Credit",
+                                "C2_Year","C2_CC","C2_Grade","C2_Source", "C2_Credit",
+                                "C3_Year","C3_CC","C3_Grade","C3_Source", "C3_Credit",
+                                "C4_Year","C4_CC","C4_Grade","C4_Source", "C4_Credit",
+                                "C5_Year", "C5_CC","C5_Grade","C5_Source", "C5_Credit",
+                                "C6_Year", "C6_CC","C6_Grade","C6_Source", "C6_Credit",
+                                "C7_Year", "C7_CC","C7_Grade","C7_Source", "C7_Credit",
+                                "C8_Year", "C8_CC","C8_Grade","C8_Source", "C8_Credit",
+                                "C9_Year", "C9_CC","C9_Grade","C9_Source", "C9_Credit",
+                                "C10_Year", "C10_CC","C10_Grade","C10_Source", "C10_Credit",
+                                "C11_Year", "C11_CC","C11_Grade","C11_Source", "C11_Credit",
+                                "C12_Year", "C12_CC","C12_Grade","C12_Source", "C12_Credit",
+                                "C13_Year", "C13_CC","C13_Grade","C13_Source", "C13_Credit",
+                                "C14_Year", "C14_CC","C14_Grade","C14_Source", "C14_Credit",
+                                "C15_Year", "C15_CC","C15_Grade","C15_Source", "C15_Credit",
+                                "C16_Year", "C16_CC","C16_Grade","C16_Source", "C16_Credit",
+                                "C17_Year", "C17_CC","C17_Grade","C17_Source", "C17_Credit",
+                                "C18_Year", "C18_CC","C18_Grade","C18_Source", "C18_Credit",
+                                "C19_Year", "C19_CC","C19_Grade","C19_Source", "C19_Credit",
+                                "C20_Year", "C20_CC","C20_Grade","C20_Source", "C20_Credit",
+                                "C21_Year", "C21_CC","C21_Grade","C21_Source", "C21_Credit",
+                                "C22_Year", "C22_CC","C22_Grade","C22_Source", "C22_Credit",
+                                "C23_Year", "C23_CC","C23_Grade","C23_Source", "C23_Credit",
+                                "C24_Year", "C24_CC","C24_Grade","C24_Source", "C24_Credit",
+                                "C25_Year", "C25_CC","C25_Grade","C25_Source", "C25_Credit",
+                                "C26_Year", "C26_CC","C26_Grade","C26_Source", "C26_Credit",
+                                "C27_Year", "C27_CC","C27_Grade","C27_Source", "C27_Credit",
+                                "C28_Year", "C28_CC","C28_Grade","C28_Source", "C28_Credit",
+                                "C29_Year", "C29_CC","C29_Grade","C29_Source", "C29_Credit",
+                                "C30_Year", "C30_CC","C30_Grade","C30_Source", "C30_Credit",
+                                "C31_Year", "C31_CC","C31_Grade","C31_Source", "C31_Credit",
+                                "C32_Year", "C32_CC","C32_Grade","C32_Source", "C32_Credit",
+                                "C33_Year", "C33_CC","C33_Grade","C33_Source", "C33_Credit",
+                                "C34_Year", "C34_CC","C34_Grade","C34_Source", "C34_Credit",
+                                "C35_Year", "C35_CC","C35_Grade","C35_Source", "C35_Credit",
+                                "C36_Year", "C36_CC","C36_Grade","C36_Source", "C36_Credit",
+                                "C37_Year", "C37_CC","C37_Grade","C37_Source", "C37_Credit",
+                                "C38_Year", "C38_CC","C38_Grade","C38_Source", "C38_Credit",
+                                "C39_Year", "C39_CC","C39_Grade","C39_Source", "C39_Credit",
+                                "C40_Year", "C40_CC","C40_Grade","C40_Source", "C40_Credit",
+                                "C41_Year", "C41_CC","C41_Grade","C41_Source", "C41_Credit",
+                                "C42_Year", "C42_CC","C42_Grade","C42_Source", "C42_Credit",
+                                "C43_Year", "C43_CC","C43_Grade","C43_Source", "C43_Credit",
+                                "C44_Year", "C44_CC","C44_Grade","C44_Source", "C44_Credit",
+                                "C45_Year", "C45_CC","C45_Grade","C45_Source", "C45_Credit",
+                                "C46_Year", "C46_CC","C46_Grade","C46_Source", "C46_Credit",
+                                "C47_Year", "C47_CC","C47_Grade","C47_Source", "C47_Credit",
+                                "C48_Year", "C48_CC","C48_Grade","C48_Source", "C48_Credit",
+                                "C49_Year", "C49_CC","C49_Grade","C49_Source", "C49_Credit",
+                                "C50_Year", "C50_CC","C50_Grade","C50_Source", "C50_Credit",
+                                "C51_Year", "C51_CC","C51_Grade","C51_Source", "C51_Credit",
+                                "C52_Year", "C52_CC","C52_Grade","C52_Source", "C52_Credit",
+                                "C53_Year", "C53_CC","C53_Grade","C53_Source", "C53_Credit",
+                                "C54_Year", "C54_CC","C54_Grade","C54_Source", "C54_Credit",
+                                "C55_Year", "C55_CC","C55_Grade","C55_Source", "C55_Credit",
+                                "C56_Year", "C56_CC","C56_Grade","C56_Source", "C56_Credit",
+                                "C57_Year", "C57_CC","C57_Grade","C57_Source", "C57_Credit",
+                                "C58_Year", "C58_CC","C58_Grade","C58_Source", "C58_Credit",
+                                "C59_Year", "C59_CC","C59_Grade","C59_Source", "C59_Credit",
+                                "C60_Year", "C60_CC","C60_Grade","C60_Source", "C60_Credit",
+                                "C61_Year", "C61_CC","C61_Grade","C61_Source", "C61_Credit",
+                                "C62_Year", "C62_CC","C62_Grade","C62_Source", "C62_Credit",
+                                "C63_Year", "C63_CC","C63_Grade","C63_Source", "C63_Credit",
+                                "C64_Year", "C64_CC","C64_Grade","C64_Source", "C64_Credit")
+# Pivot long                              
+nlsy_GPA_noError_long <- nlsy_GPA_noError %>% 
+                            pivot_longer(-R0000100, names_to = c("Course_Number", ".value"),
+                                         names_sep = "_") # why I needed those funky names above
+
+# Remove rows where Grade = 6 ("Pass"), Note for others, 0 = E/F, 1 = D, 2 = C, 3 = B, 4 = A
+# Credit is funky, so I'm going to remove that, 
+# I also can't find record of course codes, so will remove that too, also don't really need source...
+nlsy_GPA_noError_long <- nlsy_GPA_noError_long %>% filter(Grade != 6) %>% dplyr::select(-Credit, -CC, -Source)
+
+# Now, let's convert the negative values to NA, and remove them. 
+nlsy_GPA_noError_long[nlsy_GPA_noError_long < 0] <- NA
+nlsy_GPA_noError_long <- nlsy_GPA_noError_long %>% drop_na(Grade)
+
+# Calculate GPA by averaging all of the grades reported for each participant
+nlsy_GPA_noError_CalcGPA <- 
+  nlsy_GPA_noError_long %>% 
+  group_by(R0000100) %>% # Group all courses within an individual's ID number
+  summarise(
+    GPA = mean(Grade) # Create new GPA variable
+  )
+
+# Take a peek at the GPA variable
+head(nlsy_GPA_noError_CalcGPA)
+  
+# Join with main dataset
+nlsy <- left_join(nlsy, nlsy_GPA_noError_CalcGPA, by = "R0000100")
+head(nlsy)
+dim(nlsy)
+```
+  
+## Finalizing the data  
+  
+Adding in GPA completes the reading in of data. Next, meaningful names were updated (while still keeping the original variable name appended on the end for ease of reference to the codebook) to finalize the dataset (NLSY_F), and the cognitive ability indicator variable was created based on percentile rank for IQ, ACT, and SAT scores.  
+  
+
+```{r}
+# Remove variables I don't end up using 
+nlsy <- nlsy %>% 
+  dplyr::select(-T3489700, -T3047500, -R6911101, -R6917801,
+                -R6919201, -T0309300, -T3056000, -T3058300, 
+                -T3977400, -H0003200, -H0003300, -H0003400, 
+                -R0017302,  -R0620601, -R0620602, -R0017384, 
+                -R0017385, -R0216701,-R0229200, -R0620400, 
+                -R0620300, -T0309000, -T3093500)
+
+# Rename columns to provide more information and keep the original reference name
+colnames(nlsy) <- c("ID_R0000100", "MthBrn_R0000300", "YrBrn_R0000500",
+                    "Res14_R0001800", "HGCm_R0006500", "HGCf_R0007900", 
+                    "TotalEnrlmnt_R0017356", "NumBks_R0017358","PctDis_R0017366",
+                    "PctAttnd_R0017367", "PctDO_R0017368","PctStuF_R0017379",
+                    "PctFacF_R0017380","FTCouns_R0017381","FTFac_R0017382",
+                    "PCTFTGradDeg_R0017383","Race_R0214700","Sex_R0214800",
+                    "DaysAbs9_R0619100","DaysAbs10_R0619200", "DaysAbs11_R0619300",
+                    "DaysAbs12_R0619400","Rank_R0619500","NumInClss_R0619600",
+                    "PSAT_M_R0619700","PSAT_V_R0619800","SAT_M_R0619900","SAT_V_R0620000",
+                    "ACT_M_R0620100","ACT_V_R0620200","RsnLeftSch_R0620500",
+                    "FinTrnscpStatus_R0620600","HdSt_R4531700", "SelfInc1999_R6909701",
+                    "FamInc1999_R7006500","PovSts1999_R7006600","HghstDeg_T2274100",
+                    "SelfInc2009_T3045300","FamInc2009_T3107800","PovSts2009_T3108000", 
+                    "Marital_Status", "Num_Kids_HH",
+                    "avg_IQ_percentile", "GPA")
+
+# Mutate factors of interest and recode/relevel as needed
+nlsy <- nlsy %>% filter(FinTrnscpStatus_R0620600 == 1) %>% 
+  # Pull those only with completed transcripts
+  mutate(Sex_R0214800 = as.factor(Sex_R0214800)) %>%  # Convert sex to a factor
+  mutate(Sex_R0214800 = recode(Sex_R0214800, "1" = 1, "2" = 0)) %>% # 1 = Male, 0 = Female
+  mutate(HghstDeg_T2274100 = as.factor(HghstDeg_T2274100)) %>% 
+  # Convert highest degree obt. to factor
+  # Recode highest degree obtained
+  mutate(HghstDeg_T2274100 = recode(HghstDeg_T2274100, "0" = "None", 
+                                    "1" = "High School Diploma (or equivalent)",
+                                    "2" = "Associate/Junior College",
+                                    "3" = "Bachelor of Arts",
+                                    "4" = "Bachelor of Science",
+                                    "5" = "Master's Degree (MA, MBA, MS, MSW)",
+                                    "6" = "Doctoral Degree (PhD)",
+                                    "7" = "Professional Degree (MD, LLD, DDS)",
+                                    "8" = "Other")) %>% 
+  filter(HghstDeg_T2274100 != "Other") %>%  # Remove non-informative "other" category
+  mutate(HdSt_R4531700 = as.factor(HdSt_R4531700)) %>% # Convert and recode headstart variable
+  # Combine days absent across HS career to single variable
+  mutate(DaysAbsent = DaysAbs9_R0619100 + DaysAbs10_R0619200 + 
+           DaysAbs11_R0619300 + DaysAbs12_R0619400) %>% 
+  mutate(PovSts2009_T3108000 = as.factor(PovSts2009_T3108000)) %>%  
+  # Convert and recode poverty variable
+  mutate(PovSts2009_T3108000 = recode(PovSts2009_T3108000, 
+                                  "0" = "Not In Poverty","1" = "In Poverty")) %>%
+  # Convert and recode reason for leaving school variable and remove "other" category
+  mutate(RsnLeftSch_R0620500 = as.factor(RsnLeftSch_R0620500)) %>% 
+  mutate(RsnLeftSch_R0620500 = recode(RsnLeftSch_R0620500, "1" = "Graduated",
+                                      "2" = "Transferred", "3" = "Expelled",
+                                      "4" = "Dropped Out", "5" = "Other",
+                                      "6" = "Received a GED")) %>% 
+  mutate(Marital_Status = as.factor(Marital_Status)) %>% 
+  filter(RsnLeftSch_R0620500 != "Other")
+
+dim(nlsy)
+
+# write.csv(nlsy, "NLSY_F.csv") # Write final CSV file to save
+
+# nlsy <- read_csv("NLSY_F.csv") # Read in final data file
+
+# nlsy <- nlsy[,-1] # Remove column of row names
+
+####
+### Prep for cognitive ability indicator based on percentile rank for IQ, ACT, or SAT
+####
+# Create ACT and SAT Composites 
+nlsy <- nlsy %>% 
+  mutate(ACT_Composite = (ACT_M_R0620100 + ACT_V_R0620200) / 2) %>% 
+  mutate(SAT_Composite = SAT_M_R0619900 + SAT_V_R0620000)
+
+# Convert SAT to ACT
+nlsy$SATtoACT_Convert <- ifelse(nlsy$SAT_Composite <= 580, 10,
+                                ifelse(nlsy$SAT_Composite >= 590 & nlsy$SAT_Composite <= 670, 11,
+                                ifelse(nlsy$SAT_Composite >= 680 & nlsy$SAT_Composite <= 730, 12,
+                                ifelse(nlsy$SAT_Composite >= 740 & nlsy$SAT_Composite <= 770, 13,
+                                ifelse(nlsy$SAT_Composite >= 780 & nlsy$SAT_Composite <= 820, 14,
+                                ifelse(nlsy$SAT_Composite >= 830 & nlsy$SAT_Composite <= 860, 15,
+                                ifelse(nlsy$SAT_Composite >= 870 & nlsy$SAT_Composite <= 900, 16,
+                                ifelse(nlsy$SAT_Composite >= 910 & nlsy$SAT_Composite <= 940, 17,
+                                ifelse(nlsy$SAT_Composite >= 950 & nlsy$SAT_Composite <= 980, 18,
+                                ifelse(nlsy$SAT_Composite >= 990 & nlsy$SAT_Composite <= 1020, 19,
+                                ifelse(nlsy$SAT_Composite >= 1030 & nlsy$SAT_Composite <= 1060, 20,
+                                ifelse(nlsy$SAT_Composite >= 1070 & nlsy$SAT_Composite <= 1100, 21,
+                                ifelse(nlsy$SAT_Composite >= 1110 & nlsy$SAT_Composite <= 1130, 22,
+                                ifelse(nlsy$SAT_Composite >= 1140 & nlsy$SAT_Composite <= 1170, 23,       
+                                ifelse(nlsy$SAT_Composite >= 1070 & nlsy$SAT_Composite <= 1100, 21,
+                                ifelse(nlsy$SAT_Composite >= 1180 & nlsy$SAT_Composite <= 1210, 24,
+                                ifelse(nlsy$SAT_Composite >= 1220 & nlsy$SAT_Composite <= 1250, 25,
+                                ifelse(nlsy$SAT_Composite >= 1260 & nlsy$SAT_Composite <= 1280, 26,
+                                ifelse(nlsy$SAT_Composite >= 1290 & nlsy$SAT_Composite <= 1310, 27,
+                                ifelse(nlsy$SAT_Composite >= 1320 & nlsy$SAT_Composite <= 1350, 28,
+                                ifelse(nlsy$SAT_Composite >= 1360 & nlsy$SAT_Composite <= 1390, 29,
+                                ifelse(nlsy$SAT_Composite >= 1400 & nlsy$SAT_Composite <= 1420, 30,
+                                ifelse(nlsy$SAT_Composite >= 1430 & nlsy$SAT_Composite <= 1460, 31,
+                                ifelse(nlsy$SAT_Composite >= 1470 & nlsy$SAT_Composite <= 1490, 32,
+                                ifelse(nlsy$SAT_Composite >= 1500 & nlsy$SAT_Composite <= 1530, 33,
+                                ifelse(nlsy$SAT_Composite >= 1540 & nlsy$SAT_Composite <= 1560, 34,
+                                ifelse(nlsy$SAT_Composite >= 1570 & nlsy$SAT_Composite <= 1590, 35,
+                                ifelse(nlsy$SAT_Composite == 1600, 36,
+                                NA))))))))))))))))))))))))))))
+# Merge converted SAT scores with ACT scores
+nlsy$ACT_Full <- ifelse(!is.na(nlsy$ACT_Composite), nlsy$ACT_Composite,
+                 ifelse(is.na(nlsy$ACT_Composite) & 
+                          !is.na(nlsy$SATtoACT_Convert), nlsy$SATtoACT_Convert,
+                              NA))
+
+# Given limited overlap in those with ACT/SAT scores and those with IQ scores...
+# Convert standardized test scores to percentile and merge with IQ
+nlsy$ACT_percentile <- ifelse(nlsy$ACT_Full >= 33, 99,
+                              ifelse(nlsy$ACT_Full == 32, 98,
+                              ifelse(nlsy$ACT_Full == 31, 96,
+                              ifelse(nlsy$ACT_Full == 30, 95,
+                              ifelse(nlsy$ACT_Full == 29, 92,
+                              ifelse(nlsy$ACT_Full == 28, 90,
+                              ifelse(nlsy$ACT_Full == 27, 87,
+                              ifelse(nlsy$ACT_Full == 26, 83,
+                              ifelse(nlsy$ACT_Full == 25, 79,
+                              ifelse(nlsy$ACT_Full == 24, 74,
+                              ifelse(nlsy$ACT_Full == 23, 68,
+                              ifelse(nlsy$ACT_Full == 22, 63,
+                              ifelse(nlsy$ACT_Full == 21, 56,
+                              ifelse(nlsy$ACT_Full == 20, 50,
+                              ifelse(nlsy$ACT_Full == 19, 43,
+                              ifelse(nlsy$ACT_Full == 18, 36,
+                              ifelse(nlsy$ACT_Full == 17, 30,
+                              ifelse(nlsy$ACT_Full == 16, 24,
+                              ifelse(nlsy$ACT_Full == 15, 18,
+                              ifelse(nlsy$ACT_Full == 14, 12,
+                              ifelse(nlsy$ACT_Full == 13, 7,
+                              ifelse(nlsy$ACT_Full == 12, 4,
+                              ifelse(nlsy$ACT_Full <= 11, 1, 
+                                     NA)))))))))))))))))))))))
+
+# Create percentile rank of cognitive ability
+nlsy$CogAbilityRank <- ifelse(!is.na(nlsy$avg_IQ_percentile), nlsy$avg_IQ_percentile,
+                              ifelse(is.na(nlsy$avg_IQ_percentile) & !is.na(nlsy$ACT_percentile),
+                                     nlsy$ACT_percentile, NA))
+
+
+# Convert class rank into a percentile
+nlsy$ClassRankPercentile <- 100 - (nlsy$Rank_R0619500/nlsy$NumInClss_R0619600)*100
+
+dim(nlsy)
+```
+
+## Final dataset   
+  
+To prepare for linear regression, the relevant demographic, school-related, and familial variables were chosen and mutated as needed (e.g., convert some to numeric and center relevant variables for interpretation). Finally, the names for the variables in linear regression were simplified once more for the correlation matrix.  
+    
+```{r}
+## 
+nlsy_sub <- nlsy %>% 
+  dplyr::select(# Demographic variables
+    Sex_R0214800, # Sex
+    HGCm_R0006500, HGCf_R0007900, # Highest grade completed by mother and father
+    GPA, CogAbilityRank, # GPA & Cognitive ability percentile rank (IQ, SAT or ACT)
+    # School-related variables
+    TotalEnrlmnt_R0017356, # Total school enrollment 
+    NumBks_R0017358, # Number of books in school library
+    PctDis_R0017366, # % Students from disadvantaged background
+    PctAttnd_R0017367, # % Average daily attendance
+    PctDO_R0017368, PctStuF_R0017379, # % 10th graders who drop out, % Female students
+    PctFacF_R0017380, FTCouns_R0017381, # % Female faculty, Number of FT counselors
+    FTFac_R0017382,  # Number of FT faculty
+    PCTFTGradDeg_R0017383, # % FT teachers with master's/PhD
+    HdSt_R4531700, # Attended headstart
+    ClassRankPercentile,
+    Marital_Status, Num_Kids_HH, # Child_b4_Marriage, # marriage and kids variables
+    SelfInc2009_T3045300, # Income 20 years later
+    HghstDeg_T2274100) %>% # Highest degree obtained 
+  rename(Sex = Sex_R0214800, 
+         Hghst_Grde_Moth = HGCm_R0006500,  Hghst_Grde_Fath = HGCf_R0007900,
+         Total_Enrlmnt = TotalEnrlmnt_R0017356, Num_Bks_Lib = NumBks_R0017358,
+         Pct_Disadv =  PctDis_R0017366, Pct_Attnd = PctAttnd_R0017367,
+         Pct_Dropout = PctDO_R0017368, Pct_Stdnt_Female = PctStuF_R0017379, 
+         Pct_Fac_Female = PctFacF_R0017380, 
+         Num_FT_Couns = FTCouns_R0017381, Num_FT_Fac = FTFac_R0017382, 
+         Pct_FT_Fac_GrdDeg = PCTFTGradDeg_R0017383, 
+         Headstart = HdSt_R4531700, Self_Inc_2009 = SelfInc2009_T3045300,
+         Hghst_Deg_Obt = HghstDeg_T2274100) %>% 
+  # Make sure Sex is a binary factor
+  mutate(Sex = as.factor(Sex)) %>% 
+  # Recode highest degree obtained to ordinal categories 
+  mutate(Hghst_Deg_Obt = as.factor(recode(Hghst_Deg_Obt,
+                                    "None" = 0,
+                                    "High School Diploma (or equivalent)" = 1,
+                                    "Associate/Junior College" = 2,
+                                    "Bachelor of Arts" = 3,
+                                    "Bachelor of Science" = 3,
+                                    "Master's Degree (MA, MBA, MS, MSW)" = 4,
+                                    "Doctoral Degree (PhD)" = 5,
+                                    "Professional Degree (MD, LLD, DDS)" = 5))) %>%
+  na.omit() # eliminate any rows with missing data
+
+dim(nlsy_sub) # dimensions at this point
+table(nlsy_sub$Sex) # how many males and females at this point
+head(nlsy_sub)
+
+write.csv(nlsy_sub, "NLSY_F_Regression.csv")
+
+```
+  
+  
+# Data Analysis  
+  
+## What are the distributional differences in income for males and females?
+  
+```{r}
+# Examine in boxplot display
+ggplot(nlsy_sub, aes( y = Self_Inc_2009, x = Sex))+
+    geom_boxplot(aes(fill = Sex), notch = TRUE)+
+    geom_jitter(aes(x = Sex), width = 0.1, color = "black") +
+    ylab('Income') + 
+    scale_fill_manual(values=c("#CD2990","#36648B"), 
+                       name="", labels = c("Female","Male")) +
+   ggtitle("Boxplot of Income by Gender") 
+
+# Create subsets by gender to remove far out outliers
+nlsy_subF <- nlsy_sub %>% 
+  filter(Sex == 0)  #females
+# remove those beyond... 
+quantile(nlsy_subF$Self_Inc_2009)[4] + (IQR(nlsy_subF$Self_Inc_2009) * 3)
+# constitutes 'far out' outliers by Tukey's convention
+
+nlsy_subM <- nlsy_sub %>% 
+  filter(Sex == 1)  #males
+# remove those beyond... 
+quantile(nlsy_subM$Self_Inc_2009)[4] + (IQR(nlsy_subM$Self_Inc_2009) * 3)
+# constitutes 'far out' outliers by Tukey's convention
+
+# Remove far out outliers
+nlsy_sub_rm_outliers <- nlsy_sub %>% 
+  filter(Self_Inc_2009 > 0) %>% 
+  # safe cutoff for both to remove those 'far out' outliers since there aren't any in between 190k and 300k
+  filter(Self_Inc_2009 < 200000)  %>% 
+  filter(Hghst_Deg_Obt != 0) # Remove the single individual with no degree 
+
+table(nlsy_sub_rm_outliers$Sex) # Number of males and females with outliers removed
+# 0 = F, 1 = M
+
+# Re-visualize boxplot with far out outliers removed
+ggplot(nlsy_sub_rm_outliers, aes( y = Self_Inc_2009, x = Sex))+
+    geom_boxplot(aes(fill = Sex), notch = TRUE)+
+    geom_jitter(aes(x = Sex), width = 0.1, color = "black") +
+    ylab('Income') + 
+    xlab('Gender') +
+    scale_fill_manual(values=c("#CD2990","#36648B"), 
+                       name="", labels = c("Female","Male")) +
+   ggtitle("Boxplot of Income by Gender") + 
+  theme_minimal() +
+  theme(axis.text.x = element_blank())
+```
+## Visualize relationship between income and other variables, stratified by gender
+  
+```{r} 
+# Income and highest grade completed by mother
+ggplot(nlsy_sub_rm_outliers, aes(x = Hghst_Grde_Moth, y = Self_Inc_2009, group = Sex,
+                                 color = Sex)) + 
+  geom_point() + # To call scatterplot
+  geom_smooth(aes(color = Sex)) + # color smoothing lines by sex
+  scale_color_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Mother's Highest Grade Completed") + # Label x-axis
+  ylab("Income") + 
+  facet_grid(rows = vars(Sex))
+```
+
+```{r}
+  
+# Income and highest grade completed by father
+ggplot(nlsy_sub_rm_outliers, aes(x = Hghst_Grde_Fath, y = Self_Inc_2009, group = Sex,
+                                 color = Sex)) + 
+  geom_point() + # To call scatterplot
+  geom_smooth(aes(color = Sex)) + # color smoothing lines by sex
+  scale_color_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Father's Highest Grade Completed") + # Label x-axis
+  ylab("Income") + 
+  facet_grid(rows = vars(Sex))
+
+```
+
+```{r}
+  
+# Income and GPA
+ggplot(nlsy_sub_rm_outliers, aes(x = GPA, y = Self_Inc_2009, group = Sex,
+                                 color = Sex)) + 
+  geom_point() + # To call scatterplot
+  geom_smooth(aes(color = Sex)) + # color smoothing lines by sex
+  scale_color_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("High School GPA") + # Label x-axis
+  ylab("Income") + 
+  facet_grid(rows = vars(Sex))
+
+```
+
+```{r}
+  
+# Income and Cognitive Ability Rank
+ggplot(nlsy_sub_rm_outliers, aes(x = CogAbilityRank, y = Self_Inc_2009, group = Sex,
+                                 color = Sex)) + 
+  geom_point() + # To call scatterplot
+  geom_smooth(aes(color = Sex)) + # color smoothing lines by sex
+  scale_color_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Cognitive Ability Percentile Rank") + # Label x-axis
+  ylab("Income") + 
+  facet_grid(rows = vars(Sex))
+
+```
+
+```{r}
+  
+# Income and Total Enrollment
+ggplot(nlsy_sub_rm_outliers, aes(x = Total_Enrlmnt, y = Self_Inc_2009, group = Sex,
+                                 color = Sex)) + 
+  geom_point() + # To call scatterplot
+  geom_smooth(aes(color = Sex)) + # color smoothing lines by sex
+  scale_color_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Total High School Enrollment") + # Label x-axis
+  ylab("Income") + 
+  facet_grid(rows = vars(Sex))
+
+```
+
+```{r}
+  
+# Income and Number of Books in School Lib.
+ggplot(nlsy_sub_rm_outliers, aes(x = Num_Bks_Lib, y = Self_Inc_2009, group = Sex,
+                                 color = Sex)) + 
+  geom_point() + # To call scatterplot
+  geom_smooth(aes(color = Sex)) + # color smoothing lines by sex
+  scale_color_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Number of Books in High School Library") + # Label x-axis
+  ylab("Income") + 
+  facet_grid(rows = vars(Sex))
+
+```
+
+```{r}
+  
+# Income and Percent disadvantaged students at school
+ggplot(nlsy_sub_rm_outliers, aes(x = Pct_Disadv, y = Self_Inc_2009, group = Sex,
+                                 color = Sex)) + 
+  geom_point() + # To call scatterplot
+  geom_smooth(aes(color = Sex)) + # color smoothing lines by sex
+  scale_color_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Percent of Students from Disadvantaged Backgrounds") + # Label x-axis
+  ylab("Income") + 
+  facet_grid(rows = vars(Sex))
+
+```
+
+```{r} 
+  
+# Income and HS percent daily attendance
+ggplot(nlsy_sub_rm_outliers, aes(x = Pct_Attnd, y = Self_Inc_2009, group = Sex,
+                                 color = Sex)) + 
+  geom_point() + # To call scatterplot
+  geom_smooth(aes(color = Sex)) + # color smoothing lines by sex
+  scale_color_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Percent Daily Attendance") + # Label x-axis
+  ylab("Income") + 
+  facet_grid(rows = vars(Sex))
+
+# Will remove later on given minimal variance and far out outliers in the percent of daily attendance
+
+```
+
+```{r} 
+  
+# Income and HS percent dropout
+ggplot(nlsy_sub_rm_outliers, aes(x = Pct_Dropout, y = Self_Inc_2009, group = Sex,
+                                 color = Sex)) + 
+  geom_point() + # To call scatterplot
+  geom_smooth(aes(color = Sex)) + # color smoothing lines by sex
+  scale_color_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Percent Dropout") + # Label x-axis
+  ylab("Income") + 
+  facet_grid(rows = vars(Sex))
+
+
+```
+```{r} 
+
+# Income and HS percent female students
+ggplot(nlsy_sub_rm_outliers, aes(x = Pct_Stdnt_Female, y = Self_Inc_2009, group = Sex,
+                                 color = Sex)) + 
+  geom_point() + # To call scatterplot
+  geom_smooth(aes(color = Sex)) + # color smoothing lines by sex
+  scale_color_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Percent of Female Students at School") + # Label x-axis
+  ylab("Income") + 
+  facet_grid(rows = vars(Sex))
+
+# Will remove later on based on the minimal information in this variable
+
+```
+
+```{r} 
+  
+# Income and HS percent faculty female
+ggplot(nlsy_sub_rm_outliers, aes(x = Pct_Fac_Female, y = Self_Inc_2009, group = Sex,
+                                 color = Sex)) + 
+  geom_point() + # To call scatterplot
+  geom_smooth(aes(color = Sex)) + # color smoothing lines by sex
+  scale_color_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Percent Faculty Female") + # Label x-axis
+  ylab("Income") + 
+  facet_grid(rows = vars(Sex))
+
+```
+
+```{r} 
+  
+# Income and number FT faculty
+ggplot(nlsy_sub_rm_outliers, aes(x = Num_FT_Fac, y = Self_Inc_2009, group = Sex,
+                                 color = Sex)) + 
+  geom_point() + # To call scatterplot
+  geom_smooth(aes(color = Sex)) + # color smoothing lines by sex
+  scale_color_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Number of FT Faculty") + # Label x-axis
+  ylab("Income") + 
+  facet_grid(rows = vars(Sex))
+
+```
+
+```{r} 
+  
+# Income and HS number FT counselors
+ggplot(nlsy_sub_rm_outliers, aes(x = Num_FT_Couns, y = Self_Inc_2009, group = Sex,
+                                 color = Sex)) + 
+  geom_point() + # To call scatterplot
+  geom_smooth(aes(color = Sex)) + # color smoothing lines by sex
+  scale_color_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Number of FT Counselors") + # Label x-axis
+  ylab("Income") + 
+  facet_grid(rows = vars(Sex))
+
+```
+```{r} 
+  
+# Income and pct ft faculty with grad degree
+ggplot(nlsy_sub_rm_outliers, aes(x = Pct_FT_Fac_GrdDeg, y = Self_Inc_2009, group = Sex,
+                                 color = Sex)) + 
+  geom_point() + # To call scatterplot
+  geom_smooth(aes(color = Sex)) + # color smoothing lines by sex
+  scale_color_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Percent of FT Faculty with a Graduate Degree") + # Label x-axis
+  ylab("Income") + 
+  facet_grid(rows = vars(Sex))
+
+```
+```{r} 
+  
+ggplot(nlsy_sub_rm_outliers, aes(x = Headstart, y = Self_Inc_2009, group = Headstart,
+                                 fill = Sex)) + 
+  geom_boxplot(notch = TRUE) +
+  scale_fill_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Attended Headstart") + # Label x-axis
+  ylab("Income") +
+  facet_grid(cols = vars(Sex))
+
+```
+```{r} 
+  
+# Income and Class Rank percentile
+ggplot(nlsy_sub_rm_outliers, aes(x = ClassRankPercentile, y = Self_Inc_2009, group = Sex,
+                                 color = Sex)) + 
+  geom_point() + # To call scatterplot
+  geom_smooth(aes(color = Sex)) + # color smoothing lines by sex
+  scale_color_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Class Rank Percentile") + # Label x-axis
+  ylab("Income") + 
+  facet_grid(rows = vars(Sex))
+
+```
+```{r} 
+  
+# Income and marital status
+ggplot(nlsy_sub_rm_outliers, aes(x = Marital_Status, y = Self_Inc_2009, group = Marital_Status,
+                                 fill = Sex)) + 
+  geom_boxplot(notch = TRUE) +
+  scale_fill_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Marital Status") + # Label x-axis
+  ylab("Income") +
+  facet_grid(cols = vars(Sex))
+
+```
+
+```{r} 
+  
+# Income and number of kids
+ggplot(nlsy_sub_rm_outliers, aes(x = Num_Kids_HH, y = Self_Inc_2009, group = Num_Kids_HH,
+                                 fill = Sex)) + 
+  geom_boxplot() +
+  scale_fill_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Number of Children in Household") + # Label x-axis
+  ylab("Income") +
+  facet_grid(cols = vars(Sex))
+
+```
+
+```{r} 
+  
+# Income and highest degree obtained
+ggplot(nlsy_sub_rm_outliers, aes(x = Hghst_Deg_Obt, y = Self_Inc_2009, group = Hghst_Deg_Obt,
+                                 fill = Sex)) + 
+  geom_boxplot(notch = TRUE) +
+  scale_fill_manual(values = c("#CD2990", "#36648B"), labels = c("Female","Male")) +
+  xlab("Highest Degree Obtained") + # Label x-axis
+  ylab("Income") +
+  facet_grid(cols = vars(Sex))
+
+```
+
+
+
+  
+# PCA  
+  
+To reduce the number of variable input in the regression, will conduct a PCA on the individual and school-level variables related to education. 
+  
+## STEP 1: Correlations for strong multicollinearity  
+
+- Look for correlations > .90
+  
+```{r, fig.width = 15, fig.height = 10}
+nlsy_sub_num <- nlsy_sub_rm_outliers %>% 
+  # Filter out non-numeric variables (binary indicators), and variables not included in the analysis or PCA
+  dplyr::select(-c(Sex, Headstart,Marital_Status, Pct_Stdnt_Female, Pct_Attnd, Num_Kids_HH)) %>% 
+  mutate(Hghst_Deg_Obt = as.numeric(Hghst_Deg_Obt))
+
+corrplot(cor(nlsy_sub_num), 
+         type="lower", #put color strength on bottom
+         tl.pos = "ld", #Character or logical, position of text labels, 
+         #'ld'(default if type=='lower') means left and diagonal,
+         tl.cex = 1, #Numeric, for the size of text label (variable names).
+         method="color", 
+         addCoef.col="gray42", 
+         diag=FALSE,
+         tl.col="black", #The color of text label.
+         tl.srt=45, #Numeric, for text label string rotation in degrees, see text
+         is.corr = FALSE, #if you include correlation matrix
+         #order = "hclust", #order results by strength
+         #col=gray.colors(100), #in case you want it in gray...
+         number.digits = 2) #number of digits after decimal
+```
+  
+Number of FT faculty is redundant with total enrollment. Will remove number of FT faculty. Also removing percent daily attendance and percent of students who are female from notes earlier.  
+
+```{r}
+nlsy_sub_rm_outliers <- nlsy_sub_rm_outliers %>% 
+  dplyr::select(-Num_FT_Fac, -Pct_Stdnt_Female, -Pct_Attnd)
+```
+
+## STEP 2: Scale the variables  
+  
+```{r}
+glimpse(nlsy_sub_rm_outliers)
+
+# remove income because that's what I want to predict and sex because I want to predict for males and females separately, also remove marital status and headstart because binary, and number of kids because logically does not relate to anything
+nlsy_sub_pred <- nlsy_sub_rm_outliers %>% 
+  dplyr::select(-Self_Inc_2009, -Sex, -Marital_Status, -Headstart, -Num_Kids_HH) %>% 
+  mutate(Hghst_Deg_Obt = as.numeric(Hghst_Deg_Obt))
+
+dim(nlsy_sub_pred)
+
+scaled_data_pca <- nlsy_sub_pred %>% 
+  mutate_at(c(1:13), ~(scale(.) %>% as.vector))
+
+psych::describe(scaled_data_pca) 
+```
+
+## STEP 3: Visualizing PCA  
+  
+```{r}
+#line below runs a simple PCA with a component for each variable. 
+#the most variance will be explained in component 1 and 2
+viz_pca <- prcomp(scaled_data_pca, center = TRUE,scale. = TRUE)
+
+
+#Graph of variables. Positive correlated variables point to the same side of the plot. Negative correlated variables point to opposite sides of the graph.
+
+fviz_pca_var(viz_pca,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE #Avoid overlapping text if possible 
+             )
+```
+  
+  
+## STEP 4: Bartlett's test  
+  
+```{r}
+cortest.bartlett(scaled_data_pca, 300) #300 equals sample size
+
+# p value below .05, so it is not an identity matrix
+```  
+  
+  
+## STEP 5: KMO
+
+Measure of Sampling Adequacy (MSA) of factor analytic data matrices called the Kaiser-Meyer-Olkin (KMO) index.
+
+The test measures sampling adequacy for each variable in the model and for the complete model.
+
+The statistic is a measure of the proportion of variance among variables that might be common variance. 
+ 
+The higher the proportion, the more suited your data is to Factor Analysis.
+
+- Kaiser (1974) recommends a bare minimum of .5
+- values between .5 and .7 are mediocre
+- values between .7 and .8 are good
+- values between .8 and .9 are great
+- values above .9 are superb
+
+
+```{r}
+
+KMO(scaled_data_pca)
+
+scaled_data_pca <- scaled_data_pca %>%
+  dplyr::select(-Pct_Dropout) # small KMO
+
+KMO(scaled_data_pca)
+
+scaled_data_pca <- scaled_data_pca %>%
+   dplyr::select(-Pct_Fac_Female) # logically doesn't fit with anything and low KMO
+
+KMO(scaled_data_pca) 
+
+```
+  
+  
+## STEP 6: Baseline PCA to select number of components  
+  
+```{r}
+
+#run a base pca with as many components as possible 
+pca_base <- principal(scaled_data_pca, nfactors = 11, rotate = "none")
+
+pca_base #results
+
+# Kaiser's rule (eigenvalues >= 1.0) would tell us 3
+
+#scree plot
+plot(pca_base$values, type = "b")
+
+# Scree plot suggests 3 components as well
+
+```
+  
+  
+## STEP 7: Check that residuals are normally distributed
+
+```{r}
+
+pca_resid <- principal(scaled_data_pca, nfactors = 3, rotate = "promax")
+
+#residuals
+#require correlation matrix for final data
+corMatrix<-cor(scaled_data_pca)
+#corMatrix
+
+#next,create an object from the correlation matrix and the pca loading. Call it residuals. It will contain the factor residuals
+residuals<-factor.residuals(corMatrix, pca_resid$loadings)
+
+#call a histogram to check residuals
+hist(residuals) # Looks pretty good, positively skewed, but not bad
+
+```
+  
+  
+## STEP 8: Informed PCA with specific number of components
+  
+```{r}
+
+#rotation. Since factors should be related, use oblique technique (promax), if unrelated, use varimax
+pca_final <- principal(scaled_data_pca, nfactors = 3, rotate = "promax")
+pca_final #results. 
+
+#let's make the results easier to read. Include loadings over .3 (think of medium correlation) and sort them
+
+print.psych(pca_final, cut = 0.3, sort = TRUE)
+
+# Plot results
+fa.diagram(pca_final)
+plot(pca_final) 
+
+```
+  
+  
+## STEP 9: Collect factor scores  
+  
+
+```{r}
+
+#we need the pca scores
+pca_final_scores <- as.data.frame(pca_final$scores)
+head(pca_final_scores)
+
+#rename columns
+pca_final_scores <- pca_final_scores %>% 
+  rename(Ability_Level = RC1, School_Size = RC2, Childhood_SES = RC3)
+
+#combine this dataframe with earlier dataframe (nlsy_sub)
+
+str(nlsy_sub_rm_outliers)
+
+final_data <- cbind(nlsy_sub_rm_outliers, pca_final_scores)
+str(final_data)
+
+write.csv(pca_final_scores,"pca_scores_final_df_nlsy.csv", row.names=FALSE)
+
+```
+ 
+ 
+# Linear Regression with Stepwise Sequential Selection and Cross-validation   
+  
+## Separate by gender
+  
+```{r}
+# For females:
+final_data_F <- final_data  %>% 
+  filter(Sex == 0) # choose females only 
+nrow(final_data_F) 
+
+## For males:
+final_data_M <- final_data  %>% 
+  filter(Sex == 1) # choose males only 
+nrow(final_data_M) 
+
+```
+  
+
+## Predicting income for females  
+  
+```{r}
+set.seed(31) # Set seed  
+
+# New variable to divide data into training and test set
+final_data_F <- final_data_F %>% 
+  mutate(ID = row_number())
+
+# Select training set 
+train_setF <- final_data_F %>% 
+  sample_frac(0.80) # 80% of sample for training set
+
+# Select test set 
+# Anti-join to pull all else from dataset not in training set into test set
+test_setF  <- anti_join(final_data_F, train_setF, by = 'ID')
+
+# Remove unnecessary ID variable 
+train_setF <- train_setF %>% 
+  dplyr::select(-ID)
+nrow(train_setF) 
+
+test_setF <- test_setF %>% 
+  dplyr::select(-ID)
+nrow(test_setF)
+
+set.seed(31) # Set seed
+train.ctrl <- trainControl(method = "cv", number = 5, seeds = NULL) # Set up for 5-fold CV
+
+set.seed(31) # Set seed
+nlsyInc_lm_cv5_stepF <-train(Self_Inc_2009 ~ Ability_Level + School_Size + Childhood_SES +
+                               Marital_Status + Num_Kids_HH + Headstart + Pct_Dropout + Pct_Fac_Female,
+                         data = train_setF, # Utilize only the train set
+                         method = "leapSeq", # Backward and forward selection
+                         tuneGrid = data.frame(nvmax = 1:8), # using predictors that we have
+                         trControl = train.ctrl) # 5-fold cross-validation as defined above
+
+summary(nlsyInc_lm_cv5_stepF) # Summary of variable selection
+
+# Determine best tuned model and examine RMSE and R^2
+# RMSE is at its lowest here and R^2 is at its highest
+nlsyInc_lm_cv5_stepF$results[nlsyInc_lm_cv5_stepF$bestTune[1, "nvmax"],]
+
+# Variables for the best model
+round(coef(nlsyInc_lm_cv5_stepF$finalModel, nlsyInc_lm_cv5_stepF$bestTune[1,"nvmax"]),2)
+
+# Examine summary for final model with training set
+final_lm_Inc_F <- lm(Self_Inc_2009 ~ Ability_Level + Childhood_SES,
+                     data = train_setF)
+summary(final_lm_Inc_F)
+round(sqrt(mean(final_lm_Inc_F$residuals^2)),4) # RMSE
+
+# Examine actual vs. predicted values in training set
+fitted_trainF <- predict(final_lm_Inc_F) # Pull fitted values
+actual_trainF <- train_setF$Self_Inc_2009 # Pull actual values from training set
+fitted_trainF <- unname(fitted_trainF) # Unname to have appropriate formatting for vector
+act_fit_trainF <- cbind.data.frame(actual_trainF, fitted_trainF) # Create dataframe of actual vs. predicted
+
+ggplot(act_fit_trainF, aes(x = actual_trainF, y = fitted_trainF)) + # Define data, x-axis, y-axis
+  geom_point() + # To call scatterplot
+  xlab("Actual Income") + # Label x-axis
+  ylab("Predicted Income") + # Label y-axis
+  ggtitle("Actual vs. Predicted Income (Training Set, Females)") + # Title
+  geom_abline(color = "#CD2990", # Add line of equality
+              linewidth = 1) +
+  scale_x_continuous(limits = c(0, 160000)) + # Set range of x
+  scale_y_continuous(limits = c(0, 160000)) + # Set range of y
+  theme_minimal()
+
+```
+  
+### Validate on holdout test set   
+  
+```{r}
+## Gather predicted values for test set, females
+test_predictF <- predict(final_lm_Inc_F, test_setF) 
+
+corr_testF <- cor(test_predictF, test_setF$Self_Inc_2009) # Correlation between actual and predicted GPAs in test set
+round(corr_testF,4) # Correlation between actual and predicted values
+round(corr_testF^2,4) # Square for comparison to R^2 in original model on training set,
+
+# Compare actual vs. predicted in test set
+actual_testF <- test_setF$Self_Inc_2009
+act_fit_testF <- cbind.data.frame(actual_testF, test_predictF) # Dataframe of actual vs. predicted for test set
+
+ggplot(act_fit_testF, aes(x = actual_testF, y = test_predictF)) + # Call data, x-axis, y-axis
+  geom_point() + # To call scatterplot
+  xlab("Actual Income") + # Label axes
+  ylab("Predicted Income") +
+  ggtitle("Actual vs. Predicted Income (Test Set, Females)") + # Title
+  geom_abline(color = "#CD2990", # Set up line of equality
+              linewidth = 1) +
+  scale_x_continuous(limits = c(0, 160000)) +
+  scale_y_continuous(limits = c(0, 160000)) + # Set consistent range for axes
+  theme_minimal() 
+
+```
+  
+    
+## Predicting income for males
+  
+```{r}
+
+set.seed(31) # Set seed  
+
+# New variable to divide data into training and test set
+final_data_M <- final_data_M %>% 
+  mutate(ID = row_number())
+
+# Select training set 
+train_setM <- final_data_M %>% 
+  sample_frac(0.8) # 80% of sample for training set
+
+# Select test set 
+# Anti-join to pull all else from dataset not in training set into test set
+test_setM  <- anti_join(final_data_M, train_setM, by = 'ID')
+
+# Remove unnecessary ID variable 
+train_setM <- train_setM %>% 
+  dplyr::select(-ID)
+nrow(train_setM)
+
+test_setM <- test_setM %>% 
+  dplyr::select(-ID)
+nrow(test_setM)
+
+set.seed(31) # Set seed
+train.ctrl <- trainControl(method = "cv", number = 5, seeds = NULL) # Set up for 5-fold CV
+
+set.seed(31) # Set seed
+nlsyInc_lm_cv5_stepM <-train(Self_Inc_2009 ~ Ability_Level + School_Size + Childhood_SES +
+                                 Marital_Status + Num_Kids_HH + Headstart + Pct_Dropout +
+                                 Pct_Fac_Female,
+                         data = train_setM, # Utilize only the train set
+                         method = "leapSeq", # Backward and forward selection
+                         tuneGrid = data.frame(nvmax = 1:8), # using predictors that we have
+                         trControl = train.ctrl) # 5-fold cross-validation as defined above
+
+summary(nlsyInc_lm_cv5_stepM) # Summary of variable selection
+
+# Determine best tuned model and examine RMSE and R^2
+# RMSE is at its lowest here and R^2 is at its highest
+nlsyInc_lm_cv5_stepM$results[nlsyInc_lm_cv5_stepM$bestTune[1, "nvmax"],]
+
+# Variables for the best model
+round(coef(nlsyInc_lm_cv5_stepM$finalModel, nlsyInc_lm_cv5_stepM$bestTune[1,"nvmax"]),2)
+
+# Examine summary for final model with training set
+final_lm_Inc_M <- lm(Self_Inc_2009 ~ Ability_Level + Num_Kids_HH,
+                     data = train_setM)
+summary(final_lm_Inc_M)
+round(sqrt(mean(final_lm_Inc_M$residuals^2)),4) # RMSE
+
+# Examine actual vs. predicted values in training set
+fitted_trainM <- predict(final_lm_Inc_M) # Pull fitted values
+actual_trainM <- train_setM$Self_Inc_2009 # Pull actual values from training set
+fitted_trainM <- unname(fitted_trainM) # Unname to have appropriate formatting for vector
+act_fit_trainM <- cbind.data.frame(actual_trainM, fitted_trainM) # Create dataframe of actual vs. predicted
+
+ggplot(act_fit_trainM, aes(x = actual_trainM, y = fitted_trainM)) + # Define data, x-axis, y-axis
+  geom_point() + # To call scatterplot
+  xlab("Actual Income") + # Label x-axis
+  ylab("Predicted Income") + # Label y-axis
+  ggtitle("Actual vs. Predicted Income (Training Set, Males)") + # Title
+  geom_abline(color = "#36648B", # Add line of equality
+              linewidth = 1) +
+  scale_x_continuous(limits = c(0, 160000)) + # Set range of x
+  scale_y_continuous(limits = c(0, 160000)) + # Set range of y
+  theme_minimal()
+
+```
+  
+### Validate on holdout test set  
+  
+```{r}
+
+# Gather predicted values for test set, males
+test_predictM <- predict(final_lm_Inc_M, test_setM)
+
+corr_testM <- cor(test_predictM, test_setM$Self_Inc_2009) # Correlation between actual and predicted GPAs in test set
+round(corr_testM,4) # Correlation between actual and predicted values
+round(corr_testM^2,4) # Square for comparison to R^2 in original model on training set
+
+
+# Compare actual vs. predicted in test set
+actual_testM <- test_setM$Self_Inc_2009
+act_fit_testM <- cbind.data.frame(actual_testM, test_predictM) # Dataframe of actual vs. predicted for test set
+
+ggplot(act_fit_testM, aes(x = actual_testM, y = test_predictM)) + # Call data, x-axis, y-axis
+  geom_point() + # To call scatterplot
+  xlab("Actual Income") + # Label axes
+  ylab("Predicted Income") +
+  ggtitle("Actual vs. Predicted Income (Test Set, Males)") + # Title
+  geom_abline(color = "#36648B", # Set up line of equality
+              linewidth = 1) +
+  scale_x_continuous(limits = c(0, 160000)) +
+  scale_y_continuous(limits = c(0, 160000)) + # Set consistent range for axes
+  theme_minimal()
+
+```
+
+
+
+
