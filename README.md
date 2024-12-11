@@ -2,7 +2,7 @@
 Repository of code and data files for an analysis of the earnings gap in the NLSY79 sample. 
 
 # Contents
-This repository contains an .Rmd and .html file with the R code for data cleaning and analyses (visualizations, principal component analysis, and linear regression with stepwise sequential selection and cross-validation). All the necessary data files to import are included in the repository, along with the final data file used for the PCA (created by merging datasets and mutating variables) and the data used for the linear regression (which includes the PCA component scores to use in the regression).
+This repository contains an .Rmd and .html file with the R code for data cleaning and analyses (visualizations, principal component analysis, and linear regression with stepwise sequential selection and cross-validation). All the necessary data files to import are included in the repository, along with the final data file used for the PCA (created by merging datasets and mutating variables) and the data used for the linear regression (which includes the PCA component scores used in the regression).
 
 # Data
 Data for this analysis comes from participants from the National Longitudinal Survey of Youth 1979 sample. The NLSY79 survey is sponsored and directed by the U.S. Bureau of Labor Statistics and managed by the Center for Human Resource Research (CHRR) at The Ohio State University. Interviews are conducted by the National Opinion Research Center (NORC) at the University of Chicago. 
